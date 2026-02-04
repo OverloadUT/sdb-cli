@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["title"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Task title"
+    },
+    "deadline": {
+      "type": "string",
+      "format": "date",
+      "description": "Deadline date (YYYY-MM-DD)"
+    },
+    "notes": {
+      "type": "string",
+      "description": "Optional notes"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

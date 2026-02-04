@@ -129,7 +129,7 @@ export const errors = {
     new SdbError(
       ErrorCode.SCHEMA_VALIDATION_FAILED,
       'Schema validation failed',
-      'Check the data against the schema and correct any issues',
+      'Fix the validationErrors shown. Provide missing fields as --field value and retry.',
       { validationErrors: errors, ...context },
       ExitCode.INVALID_USAGE
     ),

@@ -83,6 +83,10 @@ Validate active records against the schema.
 `sdb gc <folder> [options]`  
 Garbage collect deleted records.
 
+## Wrappers
+
+Example wrapper CLI(s) live in `wrappers/`.
+
 Options:
 - `--age <duration>` — remove deleted records older than a duration
 - `--all` — remove all deleted records
@@ -126,7 +130,7 @@ Errors are JSON to stderr:
   "error": {
     "code": "SCHEMA_VALIDATION_FAILED",
     "message": "Schema validation failed",
-    "suggestion": "Check the data against the schema and correct any issues",
+    "suggestion": "Fix the validationErrors shown. Provide missing fields as --field value and retry.",
     "context": {
       "validationErrors": ["/priority: must be equal to one of the allowed values"]
     }

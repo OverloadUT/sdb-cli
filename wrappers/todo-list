@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DB="$HOME/spectra/todo"
+SCHEMA="$SCRIPT_DIR/todo-list.schema.json"
+
+usage() {
+  cat <<'EOF'
+Usage: todo-list <command> [args]
+
+Commands:
+  init
+  add --title "..." [--deadline YYYY-MM-DD]
+  list [--filter ...] [--sort ...] [--order ...] [--limit ...] [--completed]
+  update <id...> --field value ...
+  complete <id...>           # soft delete
+  delete <id...>             # hard delete
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 2
+fi
+
+cmd="$1"
+shift
+
+case "$cmd" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+esac
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --completed)
+      if [[ "$cmd" != "list" ]]; then
+        echo "--completed is only valid for list." >&2
+        exit 2
+      fi
+      ;;
+    --hard)
+      if [[ "$cmd" == "complete" ]]; then
+        echo "Hard delete is not allowed for complete. Use 'todo-list delete'." >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+case "$cmd" in
+  add)
+    exec sdb add "$DB" "$@"
+    ;;
+  init)
+    if [[ $# -ne 0 ]]; then
+      echo "init does not accept arguments." >&2
+      exit 2
+    fi
+    exec sdb init "$DB" --schema "$SCHEMA"
+    ;;
+  list)
+    if [[ $# -eq 0 ]]; then
+      exec sdb list "$DB"
+    fi
+    list_args=()
+    for arg in "$@"; do
+      [[ "$arg" == "--completed" ]] && list_args+=("--include-deleted") || list_args+=("$arg")
+    done
+    exec sdb list "$DB" "${list_args[@]}"
+    ;;
+  update)
+    exec sdb update "$DB" "$@"
+    ;;
+  complete)
+    exec sdb delete "$DB" "$@" --force
+    ;;
+  delete)
+    exec sdb delete "$DB" "$@" --hard --force
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
