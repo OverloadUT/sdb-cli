@@ -6,7 +6,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const execAsync = promisify(exec);
@@ -153,6 +153,21 @@ describe('SDB CLI Smoke Tests', () => {
     assert.ok(result.data.every((r: { priority: string }) => r.priority === 'high'));
   });
 
+  test('list supports created-within filter', async () => {
+    const dbPath = join(TEST_DIR, 'db-time');
+    const schemaPath = join(TEST_DIR, 'schema.json');
+
+    await runCli(`init ${dbPath} --schema ${schemaPath}`);
+    await runCli(`add ${dbPath} --title "Recent"`);
+
+    const { stdout, exitCode } = await runCli(`list ${dbPath} --created-within 1w`);
+    assert.strictEqual(exitCode, 0);
+
+    const result = JSON.parse(stdout);
+    assert.strictEqual(result.success, true);
+    assert.ok(result.data.length >= 1);
+  });
+
   test('get retrieves single record', async () => {
     const dbPath = join(TEST_DIR, 'db1');
     
@@ -169,6 +184,22 @@ describe('SDB CLI Smoke Tests', () => {
     assert.strictEqual(result.success, true);
     assert.strictEqual(result.data._id, id);
     assert.strictEqual(result.data.title, 'Get Test');
+  });
+
+  test('get retrieves multiple records', async () => {
+    const dbPath = join(TEST_DIR, 'db1');
+
+    const { stdout: addOutput1 } = await runCli(`add ${dbPath} --title "Get Multi 1"`);
+    const { stdout: addOutput2 } = await runCli(`add ${dbPath} --title "Get Multi 2"`);
+    const id1 = JSON.parse(addOutput1).data._id;
+    const id2 = JSON.parse(addOutput2).data._id;
+
+    const { stdout, exitCode } = await runCli(`get ${dbPath} ${id1} ${id2}`);
+    assert.strictEqual(exitCode, 0);
+
+    const result = JSON.parse(stdout);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.data.length, 2);
   });
 
   test('get returns error for non-existent ID', async () => {
@@ -198,6 +229,23 @@ describe('SDB CLI Smoke Tests', () => {
     assert.strictEqual(result.success, true);
     assert.strictEqual(result.data.priority, 'high');
     assert.strictEqual(result.data.title, 'Update Test'); // unchanged
+  });
+
+  test('update modifies multiple records', async () => {
+    const dbPath = join(TEST_DIR, 'db1');
+
+    const { stdout: addOutput1 } = await runCli(`add ${dbPath} --title "Batch 1" --priority normal`);
+    const { stdout: addOutput2 } = await runCli(`add ${dbPath} --title "Batch 2" --priority normal`);
+    const id1 = JSON.parse(addOutput1).data._id;
+    const id2 = JSON.parse(addOutput2).data._id;
+
+    const { stdout, exitCode } = await runCli(`update ${dbPath} ${id1} ${id2} --priority high`);
+    assert.strictEqual(exitCode, 0);
+
+    const result = JSON.parse(stdout);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.data.length, 2);
+    assert.ok(result.data.every((r: { priority: string }) => r.priority === 'high'));
   });
 
   test('delete requires --force', async () => {
@@ -247,6 +295,28 @@ describe('SDB CLI Smoke Tests', () => {
     assert.ok(foundDeleted._deleted);
   });
 
+  test('delete --force soft deletes multiple records', async () => {
+    const dbPath = join(TEST_DIR, 'db1');
+
+    const { stdout: addOutput1 } = await runCli(`add ${dbPath} --title "Multi Delete 1"`);
+    const { stdout: addOutput2 } = await runCli(`add ${dbPath} --title "Multi Delete 2"`);
+    const id1 = JSON.parse(addOutput1).data._id;
+    const id2 = JSON.parse(addOutput2).data._id;
+
+    const { stdout, exitCode } = await runCli(`delete ${dbPath} ${id1} ${id2} --force`);
+    assert.strictEqual(exitCode, 0);
+
+    const result = JSON.parse(stdout);
+    assert.strictEqual(result.success, true);
+
+    const { stdout: listOutput } = await runCli(`list ${dbPath}`);
+    const listResult = JSON.parse(listOutput);
+    const found1 = listResult.data.find((r: { _id: string }) => r._id === id1);
+    const found2 = listResult.data.find((r: { _id: string }) => r._id === id2);
+    assert.strictEqual(found1, undefined);
+    assert.strictEqual(found2, undefined);
+  });
+
   test('count returns record count', async () => {
     const dbPath = join(TEST_DIR, 'db1');
     
@@ -280,6 +350,72 @@ describe('SDB CLI Smoke Tests', () => {
     assert.strictEqual(result.success, true);
     assert.ok(typeof result.data.total === 'number');
     assert.ok(typeof result.data.valid === 'number');
+  });
+
+  test('validate returns error when records are invalid', async () => {
+    const dbPath = join(TEST_DIR, 'db-invalid');
+    const schemaPath = join(TEST_DIR, 'schema.json');
+
+    await runCli(`init ${dbPath} --schema ${schemaPath}`);
+    const dataFile = join(dbPath, 'data.jsonl');
+
+    const invalidRecord = {
+      _id: 'INVALID',
+      _created: new Date().toISOString(),
+      _updated: new Date().toISOString(),
+      priority: 'high',
+    };
+    writeFileSync(dataFile, `${JSON.stringify(invalidRecord)}\n`, { flag: 'a' });
+
+    const { stderr, exitCode } = await runCli(`validate ${dbPath}`);
+    assert.strictEqual(exitCode, 2);
+
+    const result = JSON.parse(stderr);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.error.code, 'SCHEMA_VALIDATION_FAILED');
+    assert.ok(Array.isArray(result.error.context.validationErrors));
+  });
+
+  test('gc removes deleted records by age', async () => {
+    const dbPath = join(TEST_DIR, 'db-gc');
+    const schemaPath = join(TEST_DIR, 'schema.json');
+
+    await runCli(`init ${dbPath} --schema ${schemaPath}`);
+
+    const { stdout: addOutput } = await runCli(`add ${dbPath} --title "GC Test"`);
+    const addResult = JSON.parse(addOutput);
+    const id = addResult.data._id;
+
+    await runCli(`delete ${dbPath} ${id} --force`);
+
+    const { stdout: gcOutput, exitCode } = await runCli(`gc ${dbPath} --age 0s --force`);
+    assert.strictEqual(exitCode, 0);
+
+    const gcResult = JSON.parse(gcOutput);
+    assert.strictEqual(gcResult.success, true);
+    assert.ok(gcResult.data.removed >= 1);
+
+    const { stdout: listOutput } = await runCli(`list ${dbPath} --include-deleted`);
+    const listResult = JSON.parse(listOutput);
+    const found = listResult.data.find((r: { _id: string }) => r._id === id);
+    assert.strictEqual(found, undefined);
+  });
+
+  test('list supports sort and limit', async () => {
+    const dbPath = join(TEST_DIR, 'db-sort');
+    const schemaPath = join(TEST_DIR, 'schema.json');
+
+    await runCli(`init ${dbPath} --schema ${schemaPath}`);
+    await runCli(`add ${dbPath} --title "B Item"`);
+    await runCli(`add ${dbPath} --title "A Item"`);
+
+    const { stdout, exitCode } = await runCli(`list ${dbPath} --sort title --order asc --limit 1`);
+    assert.strictEqual(exitCode, 0);
+
+    const result = JSON.parse(stdout);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.data.length, 1);
+    assert.strictEqual(result.data[0].title, 'A Item');
   });
 
   test('--human flag outputs human-readable text', async () => {

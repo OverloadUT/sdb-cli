@@ -95,6 +95,12 @@ export interface ListOptions {
   human?: boolean;
   debug?: boolean;
   includeDeleted?: boolean;
+  sort?: string;
+  order?: string;
+  limit?: string | number;
+  createdWithin?: string;
+  updatedWithin?: string;
+  deletedWithin?: string;
 }
 
 export interface GetOptions {
@@ -138,6 +144,15 @@ export interface SchemaOptions {
 }
 
 export interface ValidateOptions {
+  human?: boolean;
+  debug?: boolean;
+}
+
+export interface GcOptions {
+  age?: string;
+  all?: boolean;
+  dryRun?: boolean;
+  force?: boolean;
   human?: boolean;
   debug?: boolean;
 }

@@ -3,6 +3,7 @@
  */
 
 import Ajv from 'ajv';
+import type { ErrorObject, ValidateFunction } from 'ajv';
 import addFormats from 'ajv-formats';
 import { errors } from './errors.js';
 
@@ -10,13 +11,42 @@ import { errors } from './errors.js';
 const ajv = new Ajv({ 
   allErrors: true, 
   strict: false,
-  validateSchema: false,  // Don't validate the schema itself against metaschema
+  validateSchema: false,  // Don't auto-validate schemas on compile
 });
 addFormats(ajv);
 
 export interface ValidationResult {
   valid: boolean;
   errors?: string[];
+}
+
+function formatAjvErrors(errs?: ErrorObject[] | null): string[] | undefined {
+  if (!errs || errs.length === 0) return undefined;
+  return errs.map(err => {
+    const path = err.instancePath || '';
+    const message = err.message || 'Unknown error';
+    return path ? `${path}: ${message}` : message;
+  });
+}
+
+export function compileSchemaValidator(schema: object): ValidateFunction {
+  // Remove $schema meta field if present (it's just a declaration, not for validation)
+  const schemaForValidation = { ...schema } as { [key: string]: unknown };
+  delete schemaForValidation['$schema'];
+  return ajv.compile(schemaForValidation);
+}
+
+export function validateWithValidator(
+  data: unknown,
+  validate: ValidateFunction
+): ValidationResult {
+  const valid = validate(data);
+
+  if (!valid) {
+    return { valid: false, errors: formatAjvErrors(validate.errors) };
+  }
+
+  return { valid: true };
 }
 
 /**
@@ -26,25 +56,8 @@ export function validateAgainstSchema(
   data: unknown,
   schema: object
 ): ValidationResult {
-  // Remove $schema meta field if present (it's just a declaration, not for validation)
-  const schemaForValidation = { ...schema } as { [key: string]: unknown };
-  delete schemaForValidation['$schema'];
-  
-  const validate = ajv.compile(schemaForValidation);
-  const valid = validate(data);
-
-  if (!valid && validate.errors) {
-    return {
-      valid: false,
-      errors: validate.errors.map(err => {
-        const path = err.instancePath || '';
-        const message = err.message || 'Unknown error';
-        return path ? `${path}: ${message}` : message;
-      }),
-    };
-  }
-
-  return { valid: true };
+  const validate = compileSchemaValidator(schema);
+  return validateWithValidator(data, validate);
 }
 
 /**
@@ -107,6 +120,30 @@ export function validateSchemaFile(schema: unknown): void {
   if (!schemaObj.properties || typeof schemaObj.properties !== 'object') {
     throw errors.invalidInput('Schema must have properties defined', {});
   }
+
+  const properties = schemaObj.properties as { [key: string]: unknown };
+  for (const key of Object.keys(properties)) {
+    if (key.startsWith('_')) {
+      throw errors.invalidInput(`Schema cannot define reserved field '${key}'`, { field: key });
+    }
+  }
+
+  const required = Array.isArray(schemaObj.required) ? schemaObj.required : [];
+  for (const key of required) {
+    if (typeof key === 'string' && key.startsWith('_')) {
+      throw errors.invalidInput(`Schema cannot require reserved field '${key}'`, { field: key });
+    }
+  }
+
+  // Validate schema shape using Ajv's metaschema
+  const schemaForValidation = { ...schemaObj } as { [key: string]: unknown };
+  delete schemaForValidation['$schema'];
+  const schemaValid = ajv.validateSchema(schemaForValidation);
+  if (!schemaValid) {
+    throw errors.invalidInput('Schema is not a valid JSON Schema', {
+      errors: formatAjvErrors(ajv.errors),
+    });
+  }
 }
 
 /**
@@ -115,22 +152,31 @@ export function validateSchemaFile(schema: unknown): void {
 export function parseFieldArgs(args: string[]): { [key: string]: unknown } {
   const fields: { [key: string]: unknown } = {};
 
-  for (let i = 0; i < args.length; i += 2) {
-    const key = args[i];
-    const value = args[i + 1];
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
 
-    if (!key || !key.startsWith('--')) {
-      throw errors.invalidInput(`Expected --field, got '${key}'`, { position: i });
+    if (!token || !token.startsWith('--')) {
+      throw errors.invalidInput(`Expected --field, got '${token}'`, { position: i });
     }
 
+    // Support --field=value form
+    const eqIndex = token.indexOf('=');
+    const key = eqIndex === -1 ? token : token.slice(0, eqIndex);
     const fieldName = key.slice(2);
-    
+
     if (fieldName.startsWith('_')) {
       throw errors.invalidInput(`Cannot set reserved field '${fieldName}'`, { field: fieldName });
     }
 
-    if (value === undefined) {
-      throw errors.invalidInput(`Missing value for field '${fieldName}'`, { field: fieldName });
+    let value: string | undefined;
+    if (eqIndex !== -1) {
+      value = token.slice(eqIndex + 1);
+    } else {
+      value = args[i + 1];
+      if (value === undefined || value.startsWith('--')) {
+        throw errors.invalidInput(`Missing value for field '${fieldName}'`, { field: fieldName });
+      }
+      i += 1;
     }
 
     // Try to parse as JSON (for arrays, objects, numbers, booleans)

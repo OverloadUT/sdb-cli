@@ -5,7 +5,7 @@
 
 import { ulid } from 'ulid';
 import { AddOptions, SuccessResponse } from '../types.js';
-import { getDatabasePaths, ensureDatabaseExists, loadSchema, loadRecords, writeRecords, withLock, getFileSize } from '../lib/fs.js';
+import { getDatabasePaths, ensureDatabaseExists, loadSchema, loadRecords, writeRecords, withLock } from '../lib/fs.js';
 import { validateAgainstSchema, parseFieldArgs, applySchemaDefaults } from '../lib/validation.js';
 import { outputSuccess, outputHumanSuccess } from '../lib/output.js';
 import { errors, outputError } from '../lib/errors.js';

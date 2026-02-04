@@ -7,16 +7,18 @@ import { join, resolve } from 'node:path';
 import { errors } from './errors.js';
 import { LockFile, SdbRecord } from '../types.js';
 
-const LOCK_TIMEOUT_MS = 30000; // 30 seconds
-const LOCK_RETRY_MS = 100; // 100ms between retries
-const LOCK_MAX_RETRIES = 3;
+const LOCK_TIMEOUT_MS = parseInt(process.env.SDB_LOCK_TIMEOUT_MS || '120000', 10); // 2 minutes
+const LOCK_RETRY_MS = parseInt(process.env.SDB_LOCK_RETRY_MS || '100', 10); // 100ms between retries
+const LOCK_MAX_WAIT_MS = parseInt(process.env.SDB_LOCK_WAIT_MS || String(LOCK_TIMEOUT_MS), 10);
 
 export interface DatabasePaths {
   folder: string;
   dataFile: string;
+  deletedFile: string;
   schemaFile: string;
   lockFile: string;
   tempFile: string;
+  deletedTempFile: string;
 }
 
 /**
@@ -27,9 +29,11 @@ export function getDatabasePaths(folder: string): DatabasePaths {
   return {
     folder: resolved,
     dataFile: join(resolved, 'data.jsonl'),
+    deletedFile: join(resolved, 'data.deleted.jsonl'),
     schemaFile: join(resolved, 'schema.json'),
     lockFile: join(resolved, '.sdb.lock'),
     tempFile: join(resolved, 'data.jsonl.tmp'),
+    deletedTempFile: join(resolved, 'data.deleted.jsonl.tmp'),
   };
 }
 
@@ -69,30 +73,88 @@ export function loadSchema(paths: DatabasePaths): object {
 /**
  * Load all records from database
  */
-export function loadRecords(paths: DatabasePaths): SdbRecord[] {
-  if (!existsSync(paths.dataFile)) {
+function loadRecordsFromFile(
+  filePath: string,
+  operation: string,
+  allowPartialLastLine: boolean = false
+): SdbRecord[] {
+  if (!existsSync(filePath)) {
     return [];
   }
 
   try {
-    const content = readFileSync(paths.dataFile, 'utf-8');
-    const lines = content.split('\n').filter(line => line.trim());
-    return lines.map((line, index) => {
+    const content = readFileSync(filePath, 'utf-8');
+    if (!content.trim()) {
+      return [];
+    }
+    const lines = content.split('\n');
+    const endsWithNewline = content.endsWith('\n');
+    const lastIndex = lines.length - 1;
+
+    const records: SdbRecord[] = [];
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      if (!line || !line.trim()) {
+        continue;
+      }
       try {
-        return JSON.parse(line) as SdbRecord;
+        records.push(JSON.parse(line) as SdbRecord);
       } catch {
-        throw errors.operationFailed('loadRecords', `Invalid JSON on line ${index + 1}`, {
+        if (allowPartialLastLine && index === lastIndex && !endsWithNewline) {
+          // Ignore a partial trailing line from an interrupted append
+          continue;
+        }
+        throw errors.operationFailed(operation, `Invalid JSON on line ${index + 1}`, {
           line: index + 1,
           content: line.slice(0, 100),
         });
       }
-    });
+    }
+
+    return records;
   } catch (err) {
     if (err instanceof Error && err.name === 'SdbError') {
       throw err;
     }
-    throw errors.operationFailed('loadRecords', `Failed to load records: ${(err as Error).message}`, {
-      path: paths.dataFile,
+    throw errors.operationFailed(operation, `Failed to load records: ${(err as Error).message}`, {
+      path: filePath,
+    });
+  }
+}
+
+/**
+ * Load all records from database
+ */
+export function loadRecords(paths: DatabasePaths): SdbRecord[] {
+  return loadRecordsFromFile(paths.dataFile, 'loadRecords', false);
+}
+
+/**
+ * Load deleted records from database
+ */
+export function loadDeletedRecords(paths: DatabasePaths): SdbRecord[] {
+  return loadRecordsFromFile(paths.deletedFile, 'loadDeletedRecords', true);
+}
+
+/**
+ * Write all records to database (atomic write)
+ */
+function writeRecordsToFile(filePath: string, tempFile: string, records: SdbRecord[]): void {
+  try {
+    const content = records.map(r => JSON.stringify(r)).join('\n') + (records.length > 0 ? '\n' : '');
+    writeFileSync(tempFile, content, 'utf-8');
+    renameSync(tempFile, filePath);
+  } catch (err) {
+    // Clean up temp file if it exists
+    try {
+      if (existsSync(tempFile)) {
+        unlinkSync(tempFile);
+      }
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw errors.operationFailed('writeRecords', `Failed to write records: ${(err as Error).message}`, {
+      path: filePath,
     });
   }
 }
@@ -101,21 +163,26 @@ export function loadRecords(paths: DatabasePaths): SdbRecord[] {
  * Write all records to database (atomic write)
  */
 export function writeRecords(paths: DatabasePaths, records: SdbRecord[]): void {
+  writeRecordsToFile(paths.dataFile, paths.tempFile, records);
+}
+
+/**
+ * Write deleted records (atomic write)
+ */
+export function writeDeletedRecords(paths: DatabasePaths, records: SdbRecord[]): void {
+  writeRecordsToFile(paths.deletedFile, paths.deletedTempFile, records);
+}
+
+/**
+ * Append a record to deleted file
+ */
+export function appendDeletedRecord(paths: DatabasePaths, record: SdbRecord): void {
   try {
-    const content = records.map(r => JSON.stringify(r)).join('\n') + (records.length > 0 ? '\n' : '');
-    writeFileSync(paths.tempFile, content, 'utf-8');
-    renameSync(paths.tempFile, paths.dataFile);
+    const line = JSON.stringify(record) + '\n';
+    writeFileSync(paths.deletedFile, line, { flag: 'a' });
   } catch (err) {
-    // Clean up temp file if it exists
-    try {
-      if (existsSync(paths.tempFile)) {
-        unlinkSync(paths.tempFile);
-      }
-    } catch {
-      // Ignore cleanup errors
-    }
-    throw errors.operationFailed('writeRecords', `Failed to write records: ${(err as Error).message}`, {
-      path: paths.dataFile,
+    throw errors.operationFailed('appendDeletedRecord', `Failed to append deleted record: ${(err as Error).message}`, {
+      path: paths.deletedFile,
     });
   }
 }
@@ -124,7 +191,12 @@ export function writeRecords(paths: DatabasePaths, records: SdbRecord[]): void {
  * Acquire lock for write operations
  */
 export function acquireLock(paths: DatabasePaths, operation: string): void {
-  for (let retry = 0; retry < LOCK_MAX_RETRIES; retry++) {
+  const start = Date.now();
+  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+  while (true) {
+    const waitedMs = Date.now() - start;
+
     // Check if lock exists
     if (existsSync(paths.lockFile)) {
       try {
@@ -135,14 +207,16 @@ export function acquireLock(paths: DatabasePaths, operation: string): void {
         // If lock is stale, remove it
         if (lockAge > LOCK_TIMEOUT_MS) {
           unlinkSync(paths.lockFile);
-        } else {
-          // Lock is fresh, wait and retry
-          if (retry < LOCK_MAX_RETRIES - 1) {
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS);
-            continue;
-          }
+          continue;
+        }
+
+        // Lock is fresh, wait and retry
+        if (waitedMs >= LOCK_MAX_WAIT_MS) {
           throw errors.lockFailed(paths.lockFile, lock);
         }
+        const delay = LOCK_RETRY_MS + Math.floor(Math.random() * LOCK_RETRY_MS);
+        Atomics.wait(waitBuffer, 0, 0, delay);
+        continue;
       } catch (err) {
         if (err instanceof Error && err.name === 'SdbError') {
           throw err;
@@ -153,6 +227,12 @@ export function acquireLock(paths: DatabasePaths, operation: string): void {
         } catch {
           // Ignore
         }
+        if (waitedMs >= LOCK_MAX_WAIT_MS) {
+          throw errors.lockFailed(paths.lockFile);
+        }
+        const delay = LOCK_RETRY_MS + Math.floor(Math.random() * LOCK_RETRY_MS);
+        Atomics.wait(waitBuffer, 0, 0, delay);
+        continue;
       }
     }
 
@@ -168,10 +248,12 @@ export function acquireLock(paths: DatabasePaths, operation: string): void {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
         // Another process created the lock between our check and create
-        if (retry < LOCK_MAX_RETRIES - 1) {
-          continue;
+        if (waitedMs >= LOCK_MAX_WAIT_MS) {
+          throw errors.lockFailed(paths.lockFile);
         }
-        throw errors.lockFailed(paths.lockFile);
+        const delay = LOCK_RETRY_MS + Math.floor(Math.random() * LOCK_RETRY_MS);
+        Atomics.wait(waitBuffer, 0, 0, delay);
+        continue;
       }
       throw errors.operationFailed('acquireLock', `Failed to create lock: ${(err as Error).message}`, {
         path: paths.lockFile,
@@ -233,6 +315,11 @@ export function initializeDatabase(
   // Create empty data file if it doesn't exist
   if (!existsSync(paths.dataFile)) {
     writeFileSync(paths.dataFile, '', 'utf-8');
+  }
+
+  // Create empty deleted file if it doesn't exist
+  if (!existsSync(paths.deletedFile)) {
+    writeFileSync(paths.deletedFile, '', 'utf-8');
   }
 }
 

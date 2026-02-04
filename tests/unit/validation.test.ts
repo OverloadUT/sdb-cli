@@ -4,7 +4,8 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { validateAgainstSchema, parseFieldArgs, validateFolderPath, validateId, applySchemaDefaults } from '../../src/lib/validation.js';
+import { validateAgainstSchema, parseFieldArgs, validateFolderPath, validateId, applySchemaDefaults, validateSchemaFile } from '../../src/lib/validation.js';
+import { parseDurationMs } from '../../src/lib/time.js';
 
 describe('validateAgainstSchema', () => {
   const testSchema = {
@@ -61,6 +62,11 @@ describe('parseFieldArgs', () => {
     assert.deepStrictEqual(result, { count: 42 });
   });
 
+  test('parses negative numbers', () => {
+    const result = parseFieldArgs(['--count', '-1']);
+    assert.deepStrictEqual(result, { count: -1 });
+  });
+
   test('parses JSON boolean values', () => {
     const result = parseFieldArgs(['--active', 'true']);
     assert.deepStrictEqual(result, { active: true });
@@ -74,6 +80,11 @@ describe('parseFieldArgs', () => {
   test('treats non-JSON as string', () => {
     const result = parseFieldArgs(['--name', 'plain text value']);
     assert.deepStrictEqual(result, { name: 'plain text value' });
+  });
+
+  test('parses --field=value form', () => {
+    const result = parseFieldArgs(['--title=Hello', '--count=5']);
+    assert.deepStrictEqual(result, { title: 'Hello', count: 5 });
   });
 
   test('rejects reserved field names', () => {
@@ -156,5 +167,68 @@ describe('applySchemaDefaults', () => {
     const result = applySchemaDefaults({ count: 42 }, schema);
     assert.strictEqual(result.count, 42);
     assert.strictEqual(result.priority, 'normal');
+  });
+});
+
+describe('validateSchemaFile', () => {
+  test('accepts valid schema', () => {
+    assert.doesNotThrow(() => validateSchemaFile({
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+      },
+    }));
+  });
+
+  test('rejects reserved fields in properties', () => {
+    assert.throws(
+      () => validateSchemaFile({
+        type: 'object',
+        properties: {
+          _id: { type: 'string' },
+        },
+      }),
+      /reserved field/
+    );
+  });
+
+  test('rejects reserved fields in required list', () => {
+    assert.throws(
+      () => validateSchemaFile({
+        type: 'object',
+        required: ['_created'],
+        properties: {
+          title: { type: 'string' },
+        },
+      }),
+      /reserved field/
+    );
+  });
+});
+
+describe('parseDurationMs', () => {
+  test('parses seconds', () => {
+    assert.strictEqual(parseDurationMs('10s'), 10000);
+  });
+
+  test('parses minutes', () => {
+    assert.strictEqual(parseDurationMs('5m'), 5 * 60 * 1000);
+  });
+
+  test('parses hours', () => {
+    assert.strictEqual(parseDurationMs('2h'), 2 * 60 * 60 * 1000);
+  });
+
+  test('parses days', () => {
+    assert.strictEqual(parseDurationMs('7d'), 7 * 24 * 60 * 60 * 1000);
+  });
+
+  test('parses weeks', () => {
+    assert.strictEqual(parseDurationMs('1w'), 7 * 24 * 60 * 60 * 1000);
+  });
+
+  test('rejects invalid input', () => {
+    assert.throws(() => parseDurationMs('10x'), /Invalid duration/);
+    assert.throws(() => parseDurationMs('abc'), /Invalid duration/);
   });
 });

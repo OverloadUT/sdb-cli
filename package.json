@@ -1,7 +1,7 @@
 {
   "name": "@spectra/sdb",
   "version": "0.1.0",
-  "description": "Spectra Database - JSONL-based database CLI for agent operational data",
+  "description": "Spectra DB - JSONL-based database CLI for agent operational data",
   "type": "module",
   "bin": {
     "sdb": "./dist/src/index.js"

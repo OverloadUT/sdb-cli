@@ -3,10 +3,11 @@
  * Validate all records against the schema
  */
 
-import { ValidateOptions, SuccessResponse, ExitCode } from '../types.js';
+import { ValidateOptions, SuccessResponse } from '../types.js';
 import { getDatabasePaths, ensureDatabaseExists, loadSchema, loadRecords } from '../lib/fs.js';
-import { validateAgainstSchema } from '../lib/validation.js';
+import { compileSchemaValidator, validateWithValidator } from '../lib/validation.js';
 import { outputSuccess, outputHumanSuccess, formatValidationResults } from '../lib/output.js';
+import { errors, outputError } from '../lib/errors.js';
 
 interface ValidationIssue {
   id: string;
@@ -21,7 +22,8 @@ export async function validateCommand(
   ensureDatabaseExists(paths);
 
   const schema = loadSchema(paths) as object;
-  const records = loadRecords(paths);
+  const validate = compileSchemaValidator(schema);
+  const records = loadRecords(paths).filter(r => !r._deleted);
 
   const issues: ValidationIssue[] = [];
   let validCount = 0;
@@ -35,7 +37,7 @@ export async function validateCommand(
       }
     }
 
-    const result = validateAgainstSchema(userData, schema);
+    const result = validateWithValidator(userData, validate);
     
     if (result.valid) {
       validCount++;
@@ -48,14 +50,26 @@ export async function validateCommand(
   }
 
   const allValid = issues.length === 0;
+  if (!allValid) {
+    outputError(
+      errors.schemaValidationFailed(issues, {
+        total: records.length,
+        valid: validCount,
+        invalid: issues.length,
+        databasePath: paths.folder,
+        schemaPath: paths.schemaFile,
+      })
+    );
+  }
+
   const response: SuccessResponse = {
     success: true,
     action: 'validated',
     data: {
       total: records.length,
       valid: validCount,
-      invalid: issues.length,
-      issues: allValid ? undefined : issues,
+      invalid: 0,
+      issues: undefined,
     },
     metadata: {
       databasePath: paths.folder,
@@ -67,10 +81,5 @@ export async function validateCommand(
     outputHumanSuccess(formatValidationResults(records.length, validCount, issues));
   } else {
     outputSuccess(response);
-  }
-
-  // Exit with error code if there are validation issues
-  if (!allValid) {
-    process.exit(ExitCode.GENERAL_ERROR);
   }
 }

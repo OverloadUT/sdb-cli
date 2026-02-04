@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * SDB - Spectra Database
+ * SDB - Spectra DB (Spectra Database)
  * A lightweight JSONL-based database CLI for agent operational data.
  */
 
@@ -20,26 +20,27 @@ import { countCommand } from './commands/count.js';
 import { schemaCommand } from './commands/schema.js';
 import { initCommand } from './commands/init.js';
 import { validateCommand } from './commands/validate.js';
+import { gcCommand } from './commands/gc.js';
 import { OutputFormat } from './types.js';
 
 // Load package.json for version
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageJsonPath = join(__dirname, '..', '..', 'package.json');
-let version = '0.1.0';
+let version = 'unknown';
 try {
   const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
   version = pkg.version;
 } catch {
-  // Use default version
+  // Leave version as 'unknown' if package.json isn't readable
 }
 
 const program = new Command();
 
 program
   .name('sdb')
-  .description('Spectra Database - JSONL-based database CLI for agent operational data')
-  .version(version)
+  .description('Spectra DB - JSONL-based database CLI for agent operational data')
+  .version(version, '-v, --version')
   .option('--debug', 'Include stack traces in error output');
 
 // Global options handling
@@ -82,6 +83,12 @@ program
   .description('List records from the database')
   .option('--filter <expression>', 'Filter expression (jq-like syntax)')
   .option('--format <format>', 'Output format: json, table, ids', 'json')
+  .option('--sort <field>', 'Sort by field (created, updated, id, or any field)')
+  .option('--order <order>', 'Sort order: asc, desc', 'asc')
+  .option('--limit <n>', 'Limit number of records')
+  .option('--created-within <duration>', 'Only records created within this duration (e.g. 7d, 12h)')
+  .option('--updated-within <duration>', 'Only records updated within this duration (e.g. 7d, 12h)')
+  .option('--deleted-within <duration>', 'Only records deleted within this duration (requires --include-deleted)')
   .option('--include-deleted', 'Include soft-deleted records')
   .option('--human', 'Output human-readable table')
   .option('--debug', 'Include stack traces in errors')
@@ -91,6 +98,12 @@ program
         filter: options.filter,
         format: options.format as OutputFormat,
         includeDeleted: options.includeDeleted,
+        sort: options.sort,
+        order: options.order,
+        limit: options.limit,
+        createdWithin: options.createdWithin,
+        updatedWithin: options.updatedWithin,
+        deletedWithin: options.deletedWithin,
         human: options.human,
         debug: options.debug,
       });
@@ -103,13 +116,13 @@ program
 // GET command
 // ============================================================================
 program
-  .command('get <folder> <id>')
-  .description('Get a single record by ID')
+  .command('get <folder> <id...>')
+  .description('Get one or more records by ID')
   .option('--human', 'Output human-readable text')
   .option('--debug', 'Include stack traces in errors')
-  .action(async (folder: string, id: string, options) => {
+  .action(async (folder: string, ids: string[], options) => {
     try {
-      await getCommand(folder, id, {
+      await getCommand(folder, ids, {
         human: options.human,
         debug: options.debug,
       });
@@ -122,17 +135,19 @@ program
 // UPDATE command
 // ============================================================================
 program
-  .command('update <folder> <id>')
-  .description('Update fields on an existing record')
+  .command('update <folder> <id...>')
+  .description('Update fields on one or more records')
   .option('--dry-run', 'Show what would happen without executing')
   .option('--human', 'Output human-readable text')
   .option('--debug', 'Include stack traces in errors')
   .allowUnknownOption(true)
-  .action(async (folder: string, id: string, options, command) => {
+  .action(async (folder: string, _ids: string[], options, command) => {
     try {
-      // Extract field arguments
-      const fieldArgs = command.args.slice(2); // Skip folder and id
-      await updateCommand(folder, id, fieldArgs, {
+      const args = command.args.slice(1); // Skip folder
+      const firstOptionIndex = args.findIndex((arg: string) => arg.startsWith('--'));
+      const idList = firstOptionIndex === -1 ? args : args.slice(0, firstOptionIndex);
+      const fieldArgs = firstOptionIndex === -1 ? [] : args.slice(firstOptionIndex);
+      await updateCommand(folder, idList, fieldArgs, {
         dryRun: options.dryRun,
         human: options.human,
         debug: options.debug,
@@ -146,16 +161,16 @@ program
 // DELETE command
 // ============================================================================
 program
-  .command('delete <folder> <id>')
-  .description('Soft delete a record (or hard delete with --hard)')
+  .command('delete <folder> <id...>')
+  .description('Soft delete record(s) (or hard delete with --hard)')
   .option('--hard', 'Permanently remove the record')
   .option('--force', 'Confirm destructive operation')
   .option('--dry-run', 'Show what would happen without executing')
   .option('--human', 'Output human-readable text')
   .option('--debug', 'Include stack traces in errors')
-  .action(async (folder: string, id: string, options) => {
+  .action(async (folder: string, ids: string[], options) => {
     try {
-      await deleteCommand(folder, id, {
+      await deleteCommand(folder, ids, {
         hard: options.hard,
         force: options.force,
         dryRun: options.dryRun,
@@ -245,6 +260,33 @@ program
   .action(async (folder: string, options) => {
     try {
       await validateCommand(folder, {
+        human: options.human,
+        debug: options.debug,
+      });
+    } catch (err) {
+      outputUnexpectedError(err);
+    }
+  });
+
+// ============================================================================
+// GC command
+// ============================================================================
+program
+  .command('gc <folder>')
+  .description('Garbage collect deleted records')
+  .option('--age <duration>', 'Remove deleted records older than this duration (e.g. 7d, 12h)')
+  .option('--all', 'Remove all deleted records')
+  .option('--force', 'Confirm destructive operation')
+  .option('--dry-run', 'Show what would happen without executing')
+  .option('--human', 'Output human-readable text')
+  .option('--debug', 'Include stack traces in errors')
+  .action(async (folder: string, options) => {
+    try {
+      await gcCommand(folder, {
+        age: options.age,
+        all: options.all,
+        force: options.force,
+        dryRun: options.dryRun,
         human: options.human,
         debug: options.debug,
       });

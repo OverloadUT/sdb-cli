@@ -107,6 +107,15 @@ export const errors = {
       ExitCode.NOT_FOUND
     ),
 
+  recordsNotFound: (ids: string[], path?: string): SdbError =>
+    new SdbError(
+      ErrorCode.RESOURCE_NOT_FOUND,
+      `Records not found: ${ids.join(', ')}`,
+      path ? `Check if the path exists: ${path}` : 'Verify the IDs and try again',
+      { ids, path },
+      ExitCode.NOT_FOUND
+    ),
+
   resourceExists: (type: string, id: string, path: string): SdbError =>
     new SdbError(
       ErrorCode.RESOURCE_EXISTS,
